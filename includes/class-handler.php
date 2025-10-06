@@ -30,22 +30,66 @@ class ESBConnect_Leads_Handler {
 			if (is_object($record) && method_exists($record, 'get')) {
 				$raw_fields = $record->get('fields');
 				if (is_array($raw_fields)) {
-					foreach ($raw_fields as $field) {
+					// Build a map from form settings (designer config) custom_id => field_label
+					$custom_id_to_label = [];
+					$form_fields_cfg = is_object($record) && method_exists($record, 'get_form_settings') ? $record->get_form_settings('form_fields') : [];
+					if (!empty($form_fields_cfg) && is_array($form_fields_cfg)) {
+						foreach ($form_fields_cfg as $cfg) {
+							if (is_array($cfg) && !empty($cfg['custom_id'])) {
+								$custom_id_to_label[$cfg['custom_id']] = isset($cfg['field_label']) ? (string) $cfg['field_label'] : '';
+							}
+						}
+					}
+
+					// Log raw structure of fields (label/id/value) before mapping
+					$struct_preview = [];
+					foreach ($raw_fields as $id => $field) {
 						if (is_object($field) && method_exists($field, 'get_value')) {
 							$fid = method_exists($field, 'get_id') ? $field->get_id() : '';
 							$flabel = method_exists($field, 'get_label') ? $field->get_label() : '';
 							$fvalue = $field->get_value();
-							$key = $fid ?: $flabel;
-							if ($key !== '') {
-								$fields_assoc[$key] = $fvalue;
+							$pv = is_scalar($fvalue) ? (string) $fvalue : wp_json_encode($fvalue);
+							$struct_preview[] = [
+								'type' => 'object',
+								'id' => ($fid !== '' ? $fid : (is_string($id) ? $id : '')),
+								'label' => $flabel,
+								'value_preview' => substr($pv, 0, 200),
+							];
+						} elseif (is_array($field)) {
+							$fid = isset($field['id']) ? $field['id'] : (is_string($id) ? $id : '');
+							// Elementor provides title in submitted fields; fall back to form settings map or id
+							$flabel = isset($field['title']) ? $field['title'] : (isset($custom_id_to_label[$fid]) ? $custom_id_to_label[$fid] : '');
+							$fvalue = isset($field['value']) ? $field['value'] : '';
+							$pv = is_scalar($fvalue) ? (string) $fvalue : wp_json_encode($fvalue);
+							$struct_preview[] = [
+								'type' => 'array',
+								'id' => $fid,
+								'label' => $flabel,
+								'value_preview' => substr($pv, 0, 200),
+							];
+						}
+					}
+					// logging removed
+
+					// Build normalized map preferring label/title, then id
+					foreach ($raw_fields as $id => $field) {
+						if (is_object($field) && method_exists($field, 'get_value')) {
+						$fid = method_exists($field, 'get_id') ? $field->get_id() : '';
+							$flabel = method_exists($field, 'get_label') ? $field->get_label() : '';
+						$fvalue = $field->get_value();
+							$key_source = $flabel !== '' ? $flabel : ($fid !== '' ? $fid : (is_string($id) ? $id : ''));
+						$key = $key_source !== '' ? sanitize_key($key_source) : '';
+						if ($key !== '') {
+							$fields_assoc[$key] = $fvalue;
 							}
 						} elseif (is_array($field)) {
-							$fid = isset($field['id']) ? $field['id'] : '';
-							$flabel = isset($field['label']) ? $field['label'] : '';
+							$fid = isset($field['id']) ? $field['id'] : (is_string($id) ? $id : '');
+							$flabel = isset($field['title']) ? $field['title'] : (isset($custom_id_to_label[$fid]) ? $custom_id_to_label[$fid] : '');
 							$fvalue = isset($field['value']) ? $field['value'] : '';
-							$key = $fid ?: $flabel;
-							if ($key !== '') {
-								$fields_assoc[$key] = $fvalue;
+							$key_source = $flabel !== '' ? $flabel : ($fid !== '' ? $fid : (is_string($id) ? $id : ''));
+						$key = $key_source !== '' ? sanitize_key($key_source) : '';
+						if ($key !== '') {
+							$fields_assoc[$key] = $fvalue;
 							}
 						}
 					}
@@ -55,6 +99,8 @@ class ESBConnect_Leads_Handler {
 			if (empty($fields_assoc) && is_object($record) && method_exists($record, 'get_formatted_data')) {
 				$fields_assoc = (array) $record->get_formatted_data();
 			}
+
+			// (debug key map logging removed)
 
 			foreach ($fields_assoc as $key => $value) {
 				if (is_string($key) && strcasecmp($key, 'client_account_id') === 0) {
@@ -80,6 +126,7 @@ class ESBConnect_Leads_Handler {
 			];
 
 			$payload_json = wp_json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+			// logging removed
 			$signature = hash_hmac('sha256', $payload_json, (string) $settings['hmac_secret']);
 
 			global $wpdb;
@@ -92,7 +139,6 @@ class ESBConnect_Leads_Handler {
 			));
 			
 			if (!$table_exists) {
-				error_log('ESBConnect Leads: Database table does not exist: ' . $table);
 				return;
 			}
 			
@@ -111,7 +157,6 @@ class ESBConnect_Leads_Handler {
 			$insert_id = (int) $wpdb->insert_id;
 			
 			if ($wpdb->last_error) {
-				error_log('ESBConnect Leads Database Error: ' . $wpdb->last_error);
 				return;
 			}
 
@@ -135,8 +180,7 @@ class ESBConnect_Leads_Handler {
 			if (is_wp_error($response)) {
 				$status = 'error';
 				$resp_body = $response->get_error_message();
-				error_log('ESBConnect Leads ← Lambda: WP_Error after ' . $elapsed_ms . 'ms: ' . $resp_body);
-				error_log('ESBConnect Leads ← Lambda: WP_Error object: ' . print_r($response, true));
+				// logging removed
 			} else {
 				$code = (int) wp_remote_retrieve_response_code($response);
 				$resp_body = (string) wp_remote_retrieve_body($response);
@@ -145,9 +189,6 @@ class ESBConnect_Leads_Handler {
 				if (is_array($resp_headers)) {
 					$h = array_change_key_case($resp_headers, CASE_LOWER);
 					$req_id = isset($h['x-amzn-requestid']) ? $h['x-amzn-requestid'] : (isset($h['x-amzn-trace-id']) ? $h['x-amzn-trace-id'] : '');
-				}
-				if ($code < 200 || $code >= 300) {
-					$status = 'error';
 				}
 				if ($code < 200 || $code >= 300) {
 					$status = 'error';
